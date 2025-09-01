@@ -57,6 +57,12 @@ pip install onnx tensorflow
 > └── predict2 # 추론 결과 2, 다른 project 경로를 주지 않는 이상
 > ```
 
+## 사용 데이터 셋
+
+> 오픈소스를 전문 용어로 긴빠이라고 한다 아쎄이
+
+[Mahjong Grayscale Filtered - Roboflow](https://app.roboflow.com/mahjong-9gpqq/yolo_mahjong_grayscale-7ahri/4)
+
 ## 훈련
 
 ```bash
@@ -110,6 +116,175 @@ yolo export model={{ 훈련한 모델 경로 }} format=coreml
 | `multi_scale`   | 다중 스케일 학습                                |
 | `image_weights` | 이미지별 가중치 적용                            |
 | `sync_bn`       | 다중 GPU 동기화 배치 정규화                     |
+
+# flutter에 적용
+
+## 필수 파일 목록
+
+1. 이 프로젝트의 labels.txt
+2. [변환](#변환) 후 나온 tflite 파일
+
+## 공통
+
+```yaml
+# pubspec.yaml
+flutter:
+  assets:
+    - assets/model.tflite
+    - assets/labels.txt
+```
+
+## flutter에서 파일 읽기
+
+> labels.txt와 \*\*\*.tflite 파일은 assets에 존재해야 합니다.
+
+### labels.txt
+
+```dart
+import 'package:flutter/services.dart' show rootBundle;
+
+Future<List<String>> loadLabels() async {
+  final labelsData = await rootBundle.loadString('assets/labels.txt');
+  return labelsData.split('\n'); // 줄 단위로 분리
+}
+```
+
+### \*\*\*.tflite
+
+> tflite 파일은 binary 파일이므로 load 후 uint list로 변경합니다.
+
+> tflite는 [pub.dev - tflite_flutter](https://pub.dev/packages/tflite_flutter/install)를 설치해주세요.
+
+```dart
+import 'package:flutter/services.dart' show rootBundle;
+import 'dart:typed_data';
+
+Future<Uint8List> loadModel() async {
+  final modelData = await rootBundle.load('assets/model.tflite');
+  return modelData.buffer.asUint8List();
+}
+```
+
+## 이걸 싱글톤 패턴으로 관리하자
+
+```dart
+import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:flutter/services.dart' show rootBundle;
+
+class YOLOModel {
+  static final YOLOModel _instance = YOLOModel._internal();
+  static YOLOModel get instance => _instance;
+
+  // flutter에서 color는 0xAARRGGBB 형태로 표현됨 -> 0xfff 같은걸로는 안된다
+  static const _BLACK = 0xFF00000000;
+
+  Interpreter? interpreter; // tflite 인스턴스
+  List<String>? labels;     // 라벨 목록
+
+  YOLOModel._internal();
+
+  // 초기화: 모델 + labels
+  Future<void> loadModelAndLabels() async {
+    if (interpreter != null && labels != null) return;
+
+    interpreter = await Interpreter.fromAsset('assets/your_model.tflite');
+
+    final String raw = await rootBundle.loadString('assets/labels.txt');
+    labels = raw.split('\n').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+  }
+
+  // 추론 실행
+  Future<List<String>> predict(ui.Image image, {double threshold = 0.5}) async {
+    if (interpreter == null) throw Exception('Interpreter not loaded');
+    if (labels == null) throw Exception('Labels not loaded');
+
+    // 1️⃣ 이미지 전처리 (YOLO 입력 크기, float32 등)
+    final input = _imageToByteListFloat32(image, 640, 640); // 예: 640x640
+
+    // 2️⃣ 출력 배열 생성 (YOLO 모델 구조에 맞춰)
+    // 현재 YOLO 모델의 구조는 TensorSpec(shape=(1, 39, 8400), dtype=tf.float32, name=None)
+    final output = List.filled(1 * 39 * 8400, 0.0).reshape([1, 39, 8400]);
+
+    // 3️⃣ 추론 실행
+    interpreter!.run(input, output);
+
+    // 4️⃣ 후처리: threshold로 필터링 + class index → label
+    List<String> detected = [];
+    for (var box in output[0]) { // 첫 번째 이미지 추론 결과
+      // box: [x, y, w, h, score, classNo]
+      double score = box[4];
+      int classIndex = box[5].toInt();
+      if (score > threshold) {
+        detected.add('${labels![classIndex]} (${(score*100).toStringAsFixed(1)}%)');
+      }
+    }
+
+    return detected;
+  }
+
+  Future<Float32List> _imageToByteListFloat32(ui.Image image, int inputSize) async {
+    final int originalWidth = image.width;
+    final int originalHeight = image.height;
+
+    double scale = inputSize / (originalWidth > originalHeight ? originalWidth : originalHeight);
+    int resizedWidth = (originalWidth * scale).round();
+    int resizedHeight = (originalHeight * scale).round();
+
+    int padLeft = (inputSize - resizedWidth) ~/ 2;
+    int padTop = (inputSize - resizedHeight) ~/ 2;
+
+    final ui.PictureRecorder recoder = ui.PictureRecorder();
+    final ui.Canvas canvas = ui.Canvas(recorder);
+    final ui.Paint paint = ui.Paint();
+
+    // 일단 모든 영역을 검은색으로 채워
+    canvas.drawRect(
+      // LTWH = (Left, Top, Width, Height)
+      ui.Rect.fromLTWH(0, 0, inputSize.toDouble(), inputSize.toDouble()),
+      paint..color = ui.Color(_BLACK)
+    );
+    // 그리고 이미지를 덮어 씌워
+    canvas.drawImageRect(
+      image, // source
+      ui.Rect.fromLTWH(0, 0, originalWidth.toDouble(), originalHeight.toDouble()), // source에서 가져올 영역
+      ui.Rect.fromLTWH(padLeft.toDouble(), padTop.toDouble(), resizedWidth.toDouble(), resizedHeight.toDouble()), // 캔버스에 붙여넣을 영역
+      paint, // 적용
+    );
+
+    // 결과 이미지 가져오기
+    final ui.Image resizedImage = await recorder.endRecording().toImage(inputSize, inputSize);
+    final ByteData? byteData = await resizedImage.toByteData(format: ui.ImageByteFormat.rawRgba);
+    if (byteData == null) throw Exception("Failed to convert image to byte data.");
+
+    final Uint8List pixels = byteData.buffer.asUint8List();
+    final Float32List temp = Float32List(1 * inputSize * inputSize * 3);
+    Float32List buffer Float32List(1 * inputSize * inputSize * 3);
+    // 우리는 rgba 에서 rgb만 필요하다.
+    int pixelIndex = 0;
+    for (int i = 0; i < pixels.length; i += 4) {
+      temp[pixelIndex++] = pixels[i] / 255.0;     // R channel
+      temp[pixelIndex++] = pixels[i + 1] / 255.0; // G channel
+      temp[pixelIndex++] = pixels[i + 2] / 255.0; // B channel
+    }
+    buffer = temp;
+
+    // tflite 입력값에 맞게 변환. 만약 결과가 이상하다면 주석처리 후 재시도 - BHCW
+    pixelIndex = 0;
+    for (int channel = 0; channel < 3; channel++) {
+      for (int i = 0; i < temp.length / 3; i++) {
+        buffer[pixelIndex++] = temp[i*3 + channel];
+      }
+    }
+    return buffer;
+  }
+
+  void close() {
+    interpreter?.close();
+    interpreter = null;
+    labels = null;
+  }
+}
+```
 
 # 트러블 슈팅
 
