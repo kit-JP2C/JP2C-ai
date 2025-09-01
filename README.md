@@ -122,7 +122,8 @@ yolo export model={{ 훈련한 모델 경로 }} format=coreml
 ## 필수 파일 목록
 
 1. 이 프로젝트의 labels.txt
-2. [변환](#변환) 후 나온 tflite 파일
+2. [변환](#변환) 후 나온 tflite 파일  
+   [google drive - models](https://drive.google.com/drive/folders/1jw0BhpLF7_i9KWGm6tcHfb0cZ1B-5fKm?usp=drive_link)
 
 ## 공통
 
@@ -130,7 +131,7 @@ yolo export model={{ 훈련한 모델 경로 }} format=coreml
 # pubspec.yaml
 flutter:
   assets:
-    - assets/model.tflite
+    - assets/model***.tflite
     - assets/labels.txt
 ```
 
@@ -160,8 +161,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'dart:typed_data';
 
 Future<Uint8List> loadModel() async {
-  final modelData = await rootBundle.load('assets/model.tflite');
-  return modelData.buffer.asUint8List();
+  final interpreter = await Interpreter.fromAsset('assets/your_model.tflite');
 }
 ```
 
@@ -222,7 +222,8 @@ class YOLOModel {
     return detected;
   }
 
-  Future<Float32List> _imageToByteListFloat32(ui.Image image, int inputSize) async {
+  // 기본은 color 방식. grayscale 방식으로도 검증 바람
+  Future<Float32List> _imageToByteListFloat32(ui.Image image, int inputSize, { bool isGrayScale = false }) async {
     final int originalWidth = image.width;
     final int originalHeight = image.height;
 
@@ -235,7 +236,7 @@ class YOLOModel {
 
     final ui.PictureRecorder recoder = ui.PictureRecorder();
     final ui.Canvas canvas = ui.Canvas(recorder);
-    final ui.Paint paint = ui.Paint();
+    final ui.Paint paint = ui.Paint()
 
     // 일단 모든 영역을 검은색으로 채워
     canvas.drawRect(
@@ -262,9 +263,16 @@ class YOLOModel {
     // 우리는 rgba 에서 rgb만 필요하다.
     int pixelIndex = 0;
     for (int i = 0; i < pixels.length; i += 4) {
-      temp[pixelIndex++] = pixels[i] / 255.0;     // R channel
-      temp[pixelIndex++] = pixels[i + 1] / 255.0; // G channel
-      temp[pixelIndex++] = pixels[i + 2] / 255.0; // B channel
+      if (isGrayScale) { // grayscale의 경우
+        double gray = (0.2126*pixels[i] + 0.7152*pixels[i + 1] + 0.0722*pixels[i + 2]) / 255.0
+        temp[pixelIndex++] = gray
+        temp[pixelIndex++] = gray
+        temp[pixelIndex++] = gray
+      } else { // color의 경우
+        temp[pixelIndex++] = pixels[i] / 255.0;     // R channel
+        temp[pixelIndex++] = pixels[i + 1] / 255.0; // G channel
+        temp[pixelIndex++] = pixels[i + 2] / 255.0; // B channel
+      }
     }
     buffer = temp;
 
